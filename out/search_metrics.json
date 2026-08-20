@@ -1,0 +1,158 @@
+{
+  "ndcg_segmented": {
+    "bm25": {
+      "head": 0.7868,
+      "torso": 0.7724,
+      "tail": 0.7731,
+      "navigational": 0.8944,
+      "attribute": 0.9775,
+      "need": 0.2803,
+      "ALL": 0.7742
+    },
+    "dense (random negs)": {
+      "head": 0.7809,
+      "torso": 0.7755,
+      "tail": 0.7824,
+      "navigational": 0.8577,
+      "attribute": 0.9768,
+      "need": 0.372,
+      "ALL": 0.7801
+    },
+    "dense (hard negs)": {
+      "head": 0.7719,
+      "torso": 0.7697,
+      "tail": 0.776,
+      "navigational": 0.8574,
+      "attribute": 0.9758,
+      "need": 0.3471,
+      "ALL": 0.7737
+    },
+    "hybrid RRF": {
+      "head": 0.8068,
+      "torso": 0.7869,
+      "tail": 0.8001,
+      "navigational": 0.8798,
+      "attribute": 0.9781,
+      "need": 0.3994,
+      "ALL": 0.7967
+    },
+    "hybrid weighted 0.6/0.4": {
+      "head": 0.8175,
+      "torso": 0.8063,
+      "tail": 0.805,
+      "navigational": 0.8905,
+      "attribute": 0.9769,
+      "need": 0.4227,
+      "ALL": 0.8065
+    }
+  },
+  "hard_negative_delta": {
+    "random negatives": {
+      "head": 0.7809,
+      "torso": 0.7755,
+      "tail": 0.7824,
+      "navigational": 0.8577,
+      "attribute": 0.9768,
+      "need": 0.372,
+      "ALL": 0.7801
+    },
+    "hard negatives": {
+      "head": 0.7719,
+      "torso": 0.7697,
+      "tail": 0.776,
+      "navigational": 0.8574,
+      "attribute": 0.9758,
+      "need": 0.3471,
+      "ALL": 0.7737
+    },
+    "delta": {
+      "head": -0.009,
+      "torso": -0.0058,
+      "tail": -0.0063,
+      "navigational": -0.0003,
+      "attribute": -0.001,
+      "need": -0.0249,
+      "ALL": -0.0064
+    }
+  },
+  "reranker": {
+    "hybrid RRF": {
+      "head": 0.8068,
+      "torso": 0.7869,
+      "tail": 0.8001,
+      "navigational": 0.8798,
+      "attribute": 0.9781,
+      "need": 0.3994,
+      "ALL": 0.7967
+    },
+    "+ reranker": {
+      "head": 0.8148,
+      "torso": 0.8065,
+      "tail": 0.8134,
+      "navigational": 0.9142,
+      "attribute": 0.9927,
+      "need": 0.3788,
+      "ALL": 0.8114
+    },
+    "delta": {
+      "head": 0.008,
+      "torso": 0.0196,
+      "tail": 0.0133,
+      "navigational": 0.0345,
+      "attribute": 0.0146,
+      "need": -0.0207,
+      "ALL": 0.0147
+    }
+  },
+  "feature_importance": {
+    "dense": 0.60954,
+    "bm25": 0.19418,
+    "brand_in_query": 0.17202,
+    "title_token_overlap": 0.14763,
+    "rrf": 0.08631,
+    "exact_noun_match": 0.05565,
+    "category_token_overlap": 0.03195,
+    "price_z": 0.0033,
+    "popularity": 0.00173,
+    "rating": 0.00161,
+    "query_len": -0.01246
+  },
+  "substitute_vs_complement": {
+    "frac correctly ordered": {
+      "bm25": 0.6767,
+      "dense (random negs)": 0.4713,
+      "dense (hard negs)": 0.3878,
+      "hybrid RRF": 0.4694,
+      "hybrid weighted 0.6/0.4": 0.5806,
+      "reranked": 0.6319
+    }
+  },
+  "latency": {
+    "bm25 only": {
+      "p50": 1.28,
+      "p95": 3.788,
+      "p99": 11.605
+    },
+    "dense only": {
+      "p50": 0.238,
+      "p95": 1.785,
+      "p99": 20.04
+    },
+    "hybrid RRF": {
+      "p50": 2.073,
+      "p95": 9.945,
+      "p99": 15.866
+    },
+    "hybrid + rerank": {
+      "p50": 26.339,
+      "p95": 234.194,
+      "p99": 997.293
+    }
+  },
+  "ndcg_per_ms": 6.6e-05,
+  "zero_results": {
+    "before": 1.0,
+    "after": 0.0,
+    "rescued_ndcg": 0.9000044430276637
+  }
+}

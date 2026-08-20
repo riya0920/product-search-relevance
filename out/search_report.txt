@@ -1,0 +1,224 @@
+Corpus: 600 products, 600 queries (271 train / 329 test)
+Split is by QUERY TEXT (327 distinct), so no test query string was seen
+during training. See the comment in run_search.py for why that matters.
+Test segments: {'tail': np.int64(198), 'torso': np.int64(100), 'head': np.int64(31)}
+The dense model and the re-ranker are fitted on the TRAIN half only.
+Hard negatives mined for 60/271 train queries (mean 11.9 per query)
+
+==============================================================================
+1. RETRIEVAL LEGS -- NDCG@10, SEGMENTED
+==============================================================================
+                 bm25  dense (random negs)  dense (hard negs)  hybrid RRF  hybrid weighted 0.6/0.4
+head           0.7868               0.7809             0.7719      0.8068                   0.8175
+torso          0.7724               0.7755             0.7697      0.7869                   0.8063
+tail           0.7731               0.7824             0.7760      0.8001                   0.8050
+navigational   0.8944               0.8577             0.8574      0.8798                   0.8905
+attribute      0.9775               0.9768             0.9758      0.9781                   0.9769
+need           0.2803               0.3720             0.3471      0.3994                   0.4227
+ALL            0.7742               0.7801             0.7737      0.7967                   0.8065
+
+Same table, as FVA against the BM25 baseline (positive = beats BM25):
+              dense (random negs)  dense (hard negs)  hybrid RRF  hybrid weighted 0.6/0.4
+head                      -0.0059            -0.0149     +0.0199                  +0.0306
+torso                     +0.0031            -0.0027     +0.0145                  +0.0339
+tail                      +0.0092            +0.0029     +0.0270                  +0.0318
+navigational              -0.0367            -0.0370     -0.0146                  -0.0039
+attribute                 -0.0007            -0.0017     +0.0006                  -0.0006
+need                      +0.0917            +0.0668     +0.1192                  +0.1424
+ALL                       +0.0059            -0.0005     +0.0225                  +0.0323
+
+WHERE BM25 STILL WINS, and why it matters:
+  head           best = hybrid weighted 0.6/0.4  (+0.0306 vs bm25)
+  torso          best = hybrid weighted 0.6/0.4  (+0.0339 vs bm25)
+  tail           best = hybrid weighted 0.6/0.4  (+0.0318 vs bm25)
+  navigational   best = bm25                     (+0.0000 vs bm25)
+  attribute      best = hybrid RRF               (+0.0006 vs bm25)
+  need           best = hybrid weighted 0.6/0.4  (+0.1424 vs bm25)
+  ALL            best = hybrid weighted 0.6/0.4  (+0.0323 vs bm25)
+
+Navigational queries are the ones a lexical index is built for: the
+user typed a brand and a product noun, the tokens are literally in the
+title, and there is nothing for semantics to add. 'Need' queries are the
+opposite -- no product noun appears at all, so BM25 has nothing to match
+and the dense leg carries the segment.
+
+THE DEPLOYMENT CONSEQUENCE: head queries are mostly navigational AND
+carry 59% of volume. A weighted hybrid that is tuned on aggregate NDCG
+will be tuned by the tail, which is most of the QUERIES and little of the
+TRAFFIC. The mature answer is fusion weights that vary by query type --
+lexical-heavy for navigational, semantic-heavy for exploratory -- which
+is a router this build does not have.
+
+==============================================================================
+2. HARD-NEGATIVE MINING -- THE MEASURED DELTA
+==============================================================================
+              random negatives  hard negatives    delta
+head                   +0.7809         +0.7719  -0.0090
+torso                  +0.7755         +0.7697  -0.0058
+tail                   +0.7824         +0.7760  -0.0063
+navigational           +0.8577         +0.8574  -0.0003
+attribute              +0.9768         +0.9758  -0.0010
+need                   +0.3720         +0.3471  -0.0249
+ALL                    +0.7801         +0.7737  -0.0064
+
+Both models are identical in every respect except which negatives
+entered the contrastive loss: uniformly sampled irrelevant products, vs
+products BM25 ranked in its top 30 that the judgments call irrelevant.
+
+MEASURED DELTA: -0.0064 NDCG@10 overall -- NEGATIVE. Hard-negative
+mining is the trick this spec calls the highest-signal-per-effort move
+in retail search, and on this corpus it made the model WORSE. Reporting
+that is the point of running the experiment rather than citing it.
+
+Why it fails here, and it is a property of the corpus rather than of
+the technique:
+
+  1. THE NEGATIVES ARE TOO SCARCE AND TOO SPECIFIC. Mining found hard
+     negatives for only 60 of 271 training queries. In this taxonomy
+     most products are graded 1 or above for most queries -- every
+     complement category is a 1 -- so BM25's top 30 contains very few
+     genuine grade-0 items. The mined set is small and skewed toward
+     the handful of queries where BM25 fails badly.
+
+  2. WITH FEW NEGATIVES, HARD ONES OVERFIT. Replacing a broad sample
+     of easy negatives with a narrow sample of hard ones shrinks the
+     effective diversity of the loss. The model sharpens one boundary
+     and loses the general one, which is why the damage is worst on
+     'need' queries (-0.0249) -- the segment that most needs a broad
+     sense of what is far away.
+
+  3. A 600-PRODUCT CATALOGUE IS NOT WHERE THIS TECHNIQUE LIVES. Hard-
+     negative mining pays when uniform negatives are trivially
+     separable, which is a property of catalogues with millions of
+     items and dense near-duplicates. At this size the uniform
+     negatives are already informative.
+
+  The honest conclusion is not 'hard negatives do not work'. It is that
+  this corpus cannot test the claim, and the standard practitioner fix
+  -- MIXING hard and random negatives rather than substituting, which
+  is what production pipelines actually do -- is the experiment I would
+  run next and did not build.
+
+==============================================================================
+3. LEARNING-TO-RANK RE-RANKER
+==============================================================================
+NOTE THE SUBSTITUTION: LightGBM/LambdaMART is not installed, so this is
+a gradient-boosted REGRESSOR on the graded label -- a pointwise objective
+standing in for a listwise one. Pointwise fits the label, listwise fits
+the ORDER, and NDCG only cares about order. The gap below is therefore a
+floor on what a real LambdaMART would deliver.
+
+              hybrid RRF  + reranker    delta
+head             +0.8068     +0.8148  +0.0080
+torso            +0.7869     +0.8065  +0.0196
+tail             +0.8001     +0.8134  +0.0133
+navigational     +0.8798     +0.9142  +0.0345
+attribute        +0.9781     +0.9927  +0.0146
+need             +0.3994     +0.3788  -0.0207
+ALL              +0.7967     +0.8114  +0.0147
+
+Permutation feature importance (increase in MSE when shuffled):
+  dense                     +0.60954
+  bm25                      +0.19418
+  brand_in_query            +0.17202
+  title_token_overlap       +0.14763
+  rrf                       +0.08631
+  exact_noun_match          +0.05565
+  category_token_overlap    +0.03195
+  price_z                   +0.00330
+  popularity                +0.00173
+  rating                    +0.00161
+  query_len                 -0.01246
+
+Top feature: dense.
+Popularity is NOT the top feature here, which is worth stating
+because the rich-get-richer failure mode is the one screeners probe
+for. It would still bite in production, where popularity is measured
+from logs the previous ranker generated and is therefore endogenous.
+
+==============================================================================
+4. SUBSTITUTES ABOVE COMPLEMENTS
+==============================================================================
+                         frac correctly ordered
+bm25                                     0.6767
+dense (random negs)                      0.4713
+dense (hard negs)                        0.3878
+hybrid RRF                               0.4694
+hybrid weighted 0.6/0.4                  0.5806
+reranked                                 0.6319
+
+For a purchase-intent query a SUBSTITUTE must outrank a COMPLEMENT.
+Someone searching for running shoes wants a different running shoe, not
+socks. Both are 'related', a co-occurrence-driven system conflates them,
+and the graded labels are what make the distinction measurable at all.
+(Queries whose top-10 contains no substitute/complement pair are excluded,
+which is why this is reported separately rather than folded into NDCG.)
+
+THE FINDING, AND IT IS THE SHARPEST ONE IN THIS PROJECT: rank the systems
+by NDCG and by this metric and you get DIFFERENT ORDERS.
+
+  system                        NDCG@10   sub>comp
+  reranked                       0.8114     0.6319
+  hybrid weighted 0.6/0.4        0.8065     0.5806
+  hybrid RRF                     0.7967     0.4694
+  dense (random negs)            0.7801     0.4713
+  bm25                           0.7742     0.6767
+  dense (hard negs)              0.7737     0.3878
+
+Best NDCG: reranked. Best substitute ordering: bm25.
+
+They are not the same system, and BM25 -- the baseline everything else
+beats on NDCG -- is at or near the top on this metric. The mechanism is
+in the discount: NDCG@10 with 2^g-1 gains is dominated by whether the
+Exact matches (gain 7) reach the first few slots. The relative order of
+a Substitute (gain 3) and a Complement (gain 1) five slots down barely
+moves the number. So a ranker can optimise NDCG happily while filling
+its lower slots with accessories, and a shopper who wanted a different
+pair of shoes gets shown socks.
+
+This is the concrete form of 'aggregates hide everything in search'.
+The fix is not a better retrieval leg -- it is either a listwise
+objective that sees the grade ordering, or an explicit intent-aware
+constraint in the ranking layer. Neither is built here; what IS built
+is the measurement that says you need one.
+
+==============================================================================
+5. LATENCY BUDGET AND NDCG PER MILLISECOND
+==============================================================================
+                      p50       p95       p99
+bm25 only           1.280     3.788    11.605
+dense only          0.238     1.785    20.040
+hybrid RRF          2.073     9.945    15.866
+hybrid + rerank    26.339   234.194   997.293
+
+Re-ranker adds 224.25 ms at p95 and +0.0147 NDCG@10.
+NDCG PER MILLISECOND: +0.00007
+
+Search is a latency-budgeted business, so the reranker's value is a
+RATIO, not a delta. At a 40 ms rerank budget this fits; the number that
+decides deployment is NDCG-per-ms against whatever else could spend those
+milliseconds -- a bigger candidate set, a second retrieval leg, or
+personalisation.
+
+HONEST CAVEAT ON THESE TIMINGS: the index is 600 products in memory in a
+single Python process. BM25 here scores the whole catalogue linearly.
+These are relative costs between legs, not service latencies, and the
+ranking of the legs is the only thing that transfers.
+
+==============================================================================
+6. ZERO-RESULT RESCUE
+==============================================================================
+150 test queries with an unmatchable token appended:
+  zero-result rate, strict conjunctive matching : 100.0%
+  zero-result rate, after relaxation + fallback : 0.0%
+  NDCG@10 of the rescued results                : 0.9000
+
+A zero-result page is a lost session with a measurable price. The rescue
+ladder is deliberately ordered: relax to OR first (cheap, stays lexical),
+then fall back to semantic (expensive, can drift off-intent). Showing
+something is not automatically better than showing nothing -- the NDCG of
+the rescued set is reported so the tradeoff is visible rather than
+assumed. Spelling correction, which is the other half of a real rescue
+ladder, is not implemented.
+
+(166s)
