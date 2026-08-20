@@ -65,7 +65,7 @@ the segment (+0.142 for the weighted hybrid).
 **The deployment consequence:** head queries are mostly navigational *and* carry
 59% of volume. A hybrid tuned on aggregate NDCG gets tuned by the tail — most of
 the *queries*, little of the *traffic*. The mature answer is fusion weights that
-vary by query type, which is a router this build does not have.
+vary by query type — which the second pass builds, below.
 
 ## The hard-negative experiment came out negative
 
