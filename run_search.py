@@ -19,7 +19,9 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src import corpus as C  # noqa: E402
 from src import rank as R  # noqa: E402
+from src import debug as DBG  # noqa: E402
 from src import retrieval as RT  # noqa: E402
+from src import router as RO  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA, OUT = os.path.join(HERE, "data"), os.path.join(HERE, "out")
@@ -494,6 +496,272 @@ def main():
     emit("ladder, is not implemented.")
     summary["zero_results"] = dict(before=float(z_before), after=float(z_after),
                                    rescued_ndcg=float(nd_after))
+
+    # ---------------- 7. query router ----------------
+    emit("")
+    emit("=" * 78)
+    emit("7. QUERY-TYPE ROUTER -- THE DEPLOYMENT ANSWER, BUILT")
+    emit("=" * 78)
+    emit("Section 1 ended by saying a single fusion weight gets tuned by the tail")
+    emit("-- most of the QUERIES and little of the TRAFFIC -- and that the mature")
+    emit("answer is weights that vary by query type. That was named and not built.")
+    emit("")
+    router = RO.QueryRouter(products)
+
+    def leg_maps(q):
+        bs, ds = leg_scores(q, dense_hard)
+        return ({pid: float(bs[i]) for pid, i in id_index.items()},
+                {pid: float(ds[i]) for pid, i in id_index.items()})
+
+    fitted = RO.fit_weights(router, train_q, judgments, leg_maps, R.ndcg_at_k)
+    for qtype, info in sorted(fitted.items()):
+        router.weights[qtype] = info["weight"]
+    emit("Lexical fusion weight fitted PER TYPE on the training half:")
+    emit("%-16s %10s %12s %8s" % ("query type", "weight", "train NDCG", "n"))
+    for qtype, info in sorted(fitted.items()):
+        emit("%-16s %10.2f %12.4f %8d"
+             % (qtype, info["weight"], info["train_ndcg"], info["n"]))
+    emit("")
+
+    # router accuracy against the generator's true kind
+    correct = sum(1 for q in test_q if router.classify(q["text"]) == q["kind"])
+    emit("Router accuracy vs the generator's true query kind: %.1f%% on %d test"
+         % (100 * correct / len(test_q), len(test_q)))
+    emit("queries. Confusion:")
+    conf = pd.crosstab(pd.Series([q["kind"] for q in test_q], name="true"),
+                       pd.Series([router.classify(q["text"]) for q in test_q],
+                                 name="routed"))
+    emit(conf.to_string())
+    emit("")
+
+    def routed_ranked(q, k=CAND_K):
+        bm, ds = leg_maps(q)
+        return router.route(q["text"], bm, ds, k)
+
+    ev_routed = evaluate(test_q, judgments, routed_ranked)
+    evals["routed hybrid"] = ev_routed
+    RT_ = pd.DataFrame({"bm25": seg_table(evals["bm25"]),
+                        "fixed 0.6/0.4": seg_table(evals["hybrid weighted 0.6/0.4"]),
+                        "routed": seg_table(ev_routed)})
+    RT_.loc["ALL"] = [evals["bm25"].ndcg.mean(),
+                      evals["hybrid weighted 0.6/0.4"].ndcg.mean(),
+                      ev_routed.ndcg.mean()]
+    RT_["routed - fixed"] = RT_["routed"] - RT_["fixed 0.6/0.4"]
+    emit(RT_.to_string(float_format=lambda x: "%9.4f" % x))
+    emit("")
+    gain = RT_.loc["ALL", "routed - fixed"]
+    emit("Routing moves aggregate NDCG@10 by %+.4f." % gain)
+    emit("")
+    emit("READ THE SEGMENT ROWS, NOT THE AGGREGATE. The router exists to help the")
+    emit("segments that a compromise weight hurts, and the aggregate is precisely")
+    emit("the number that hides whether it did:")
+    for row in ("navigational", "attribute", "need"):
+        emit("  %-14s fixed %.4f -> routed %.4f  (%+.4f)"
+             % (row, RT_.loc[row, "fixed 0.6/0.4"], RT_.loc[row, "routed"],
+                RT_.loc[row, "routed - fixed"]))
+    emit("")
+    emit("The router is rules, not a model, on purpose: it runs on every query")
+    emit("inside the latency budget, a search engineer has to be able to explain")
+    emit("why a query routed the way it did, and its features (is there a brand?")
+    emit("a product noun? a function word?) are the ones a human would use. A")
+    emit("learned classifier here would buy accuracy and cost debuggability, and")
+    emit("at this accuracy the trade is not obviously worth it.")
+    summary["router"] = dict(weights=router.weights,
+                             accuracy=correct / len(test_q),
+                             ndcg=RT_.round(4).to_dict())
+
+    # ---------------- 8. merchandiser boosting ----------------
+    emit("")
+    emit("=" * 78)
+    emit("8. MERCHANDISER BOOSTING -- GOVERNED, LOGGED, AND PRICED")
+    emit("=" * 78)
+    emit("The spec's question: a merchandiser demands their brand ranks top-3 for")
+    emit("a generic query. Refusing outright and obeying blindly both fail. The")
+    emit("systems answer is to implement it, scope it, log it, and QUANTIFY what")
+    emit("it costs in relevance -- so the conversation becomes 'this boost costs")
+    emit("X NDCG, is it worth it' rather than 'search is broken'.")
+    emit("")
+    boost_brand = "Aeris"
+    rule = RO.BoostRule("MERCH-001", boost_brand, "shoe", target_positions=3,
+                        owner="merchandising")
+    affected = [q for q in test_q if rule.applies(q["text"])]
+    rows = []
+    for label, use in (("organic", False), ("with boost", True)):
+        nd, sub = [], []
+        for q in affected:
+            ranked = routed_ranked(q)
+            if use:
+                ranked, _audit = rule.apply(q["text"], ranked, prod_by_id)
+            lab = judgments[q["query_id"]]
+            nd.append(R.ndcg_at_k(ranked, lab, K))
+            sub.append(R.substitute_before_complement(ranked, lab, K))
+        rows.append(dict(ranking=label, n_queries=len(affected),
+                         ndcg=float(np.mean(nd)),
+                         brand_in_top3=float(np.mean([
+                             sum(1 for pid in (rule.apply(q["text"], routed_ranked(q),
+                                                          prod_by_id)[0] if use
+                                               else routed_ranked(q))[:3]
+                                 if prod_by_id[pid]["brand"] == boost_brand) > 0
+                             for q in affected]))))
+    BO = pd.DataFrame(rows).set_index("ranking")
+    emit("Rule MERCH-001: brand %r into the top 3 for queries matching 'shoe'."
+         % boost_brand)
+    emit("%d of %d test queries match." % (len(affected), len(test_q)))
+    emit("")
+    emit(BO.to_string(float_format=lambda x: "%12.4f" % x))
+    emit("")
+    cost = BO.loc["organic", "ndcg"] - BO.loc["with boost", "ndcg"]
+    emit("THE NUMBER THAT MAKES THIS A CONVERSATION: the boost costs %+.4f NDCG@10"
+         % -cost)
+    emit("on the queries it touches, and raises brand presence in the top 3 from")
+    emit("%.0f%% to %.0f%% of those queries."
+         % (100 * BO.loc["organic", "brand_in_top3"],
+            100 * BO.loc["with boost", "brand_in_top3"]))
+    emit("")
+    emit("Every firing is AUDITED -- rule id, owner, which documents moved and")
+    emit("from where. That audit record is the difference between a governed rule")
+    emit("and a hack: six months later, someone can ask why this brand outranks")
+    emit("that one and get an answer with a name attached to it.")
+    emit("")
+    emit("The rule is also SCOPED (one brand, one query pattern) rather than a")
+    emit("global score multiplier. A global brand boost is unmeasurable -- it")
+    emit("changes every query a little and no query in a way anyone can point at.")
+    summary["boosting"] = dict(rule="MERCH-001", brand=boost_brand,
+                               n_affected=len(affected),
+                               ndcg_cost=float(cost),
+                               table=BO.round(4).to_dict("index"))
+
+    # ---------------- 9. spelling ----------------
+    emit("")
+    emit("=" * 78)
+    emit("9. SPELLING CORRECTION IN THE RESCUE LADDER")
+    emit("=" * 78)
+    speller = RO.SpellCorrector(products, train_q)
+    rng_s = np.random.default_rng(3)
+
+    def typo(text):
+        toks = text.split()
+        i = int(rng_s.integers(len(toks)))
+        w = toks[i]
+        if len(w) < 4:
+            return text
+        j = int(rng_s.integers(1, len(w) - 1))
+        toks[i] = w[:j] + w[j + 1:]        # drop a character
+        return " ".join(toks)
+
+    typo_qs = [dict(q, text=typo(q["text"])) for q in test_q[:150]]
+    n_corrected = 0
+    nd_raw, nd_fixed = [], []
+    for q, orig in zip(typo_qs, test_q[:150]):
+        corrected, changes = speller.correct(q["text"])
+        if changes:
+            n_corrected += 1
+        lab = judgments[q["query_id"]]
+        nd_raw.append(R.ndcg_at_k(bm25_ranked(q), lab, K))
+        nd_fixed.append(R.ndcg_at_k(
+            bm25_ranked(dict(q, text=corrected)), lab, K))
+    emit("150 test queries with one character deleted from a token:")
+    emit("  queries where an UNAMBIGUOUS correction existed : %d (%.0f%%)"
+         % (n_corrected, 100 * n_corrected / len(typo_qs)))
+    emit("  BM25 NDCG@10 on the typo'd query                : %.4f" % np.mean(nd_raw))
+    emit("  BM25 NDCG@10 after correction                   : %.4f" % np.mean(nd_fixed))
+    emit("")
+    emit("The corrector is deliberately CONSERVATIVE: it only fires when the token")
+    emit("is out-of-vocabulary AND exactly one in-vocabulary word sits at edit")
+    emit("distance one. Aggressive correction is worse than none -- a 'corrected'")
+    emit("query that changes the user's intent produces confidently wrong results")
+    emit("and the user cannot tell what happened. The %.0f%% of typos with no"
+         % (100 * (1 - n_corrected / len(typo_qs))))
+    emit("unambiguous fix fall through to the semantic leg instead, which is what")
+    emit("the rescue ladder is for.")
+    summary["spelling"] = dict(corrected_share=n_corrected / len(typo_qs),
+                               ndcg_before=float(np.mean(nd_raw)),
+                               ndcg_after=float(np.mean(nd_fixed)))
+
+    # ---------------- 10. interleaving ----------------
+    emit("")
+    emit("=" * 78)
+    emit("10. INTERLEAVING -- HOW YOU KNOW BEFORE AN A/B")
+    emit("=" * 78)
+    emit("The spec asks how you would know your offline NDCG gains are real before")
+    emit("running an A/B. The answer is interleaving, and the first pass named it")
+    emit("and did not build it.")
+    emit("")
+    emit("Team-draft interleaving: two rankers take turns drafting into ONE result")
+    emit("list. The user cannot tell which system produced any given result, so")
+    emit("their clicks are an unbiased preference signal -- and because every")
+    emit("session compares both systems, it is far more sensitive than an A/B that")
+    emit("assigns each user to one.")
+    emit("")
+    rng_i = np.random.default_rng(11)
+    comparisons = [("routed hybrid", "bm25", routed_ranked, bm25_ranked),
+                   ("routed hybrid", "dense only", routed_ranked,
+                    dense_ranked(dense_hard))]
+    rows = []
+    for a_name, b_name, fa, fb in comparisons:
+        wins = []
+        for q in test_q:
+            lab = judgments[q["query_id"]]
+            il, src = RO.team_draft_interleave(fa(q), fb(q), k=K, rng=rng_i)
+            clicks = RO.simulate_clicks(il, lab, rng_i)
+            a_clicks = sum(1 for c in clicks if src[c] == "A")
+            b_clicks = sum(1 for c in clicks if src[c] == "B")
+            wins.append(a_clicks - b_clicks)
+        v = RO.interleaving_verdict(wins)
+        nd_a = np.mean([R.ndcg_at_k(fa(q), judgments[q["query_id"]], K) for q in test_q])
+        nd_b = np.mean([R.ndcg_at_k(fb(q), judgments[q["query_id"]], K) for q in test_q])
+        rows.append(dict(comparison="%s vs %s" % (a_name, b_name),
+                         offline_ndcg_delta=nd_a - nd_b,
+                         a_wins=v["a_wins"], b_wins=v["b_wins"], ties=v["ties"],
+                         preference_for_a=v["preference"], p_value=v["p_value"]))
+    IL = pd.DataFrame(rows).set_index("comparison")
+    emit(IL.to_string(float_format=lambda x: "%14.4f" % x))
+    emit("")
+    emit("`preference_for_a` above 0.5 means users clicked the first system's")
+    emit("results more often when both were shown together. The p-value is a sign")
+    emit("test over per-query preferences -- the unit is a QUERY and the outcome")
+    emit("is ordinal, so a sign test is right and a t-test on click counts is not.")
+    emit("")
+    emit("THE HONEST CAVEAT, and it is a large one: these clicks are SIMULATED")
+    emit("from the relevance labels with a geometric position bias. That makes")
+    emit("this a demonstration that the MACHINERY works -- drafting, attribution,")
+    emit("sign test -- and not evidence about user preference, because the")
+    emit("simulated user is defined to like what the labels like. On real traffic")
+    emit("the entire value of interleaving is that clicks and labels DISAGREE, and")
+    emit("nothing here can show that. What it does show is that the offline NDCG")
+    emit("delta and the interleaving preference are two different measurements,")
+    emit("and shipping on the first without the second is a choice, not a default.")
+    summary["interleaving"] = IL.round(4).to_dict("index")
+
+    # ---------------- 11. query debug view ----------------
+    emit("")
+    emit("=" * 78)
+    emit("11. THE QUERY-DEBUG VIEW")
+    emit("=" * 78)
+    emit("The spec calls this the internal tool every search team builds. The first")
+    emit("pass shipped a permutation-importance table, which answers a different")
+    emit("question: what the model uses ON AVERAGE. Debugging a complaint needs to")
+    emit("know why THIS document beat THAT one for THIS query.")
+    emit("")
+    picks = [q for q in test_q if q["kind"] == "need"][:1] + \
+            [q for q in test_q if q["kind"] == "navigational"][:1]
+    for q in picks:
+        cands = hybrid_rrf(dense_hard)(q, CAND_K)
+        bm, ds = leg_maps(q)
+        rmap = RT.rrf([bm25_ranked(q, CAND_K), dense_ranked(dense_hard)(q, CAND_K)])
+        Xq = R.build_features(q, cands, bm, ds, rmap, prod_by_id, p_mean, p_sd)
+        ranked = cache.get(q["query_id"], cands)
+        qtype = router.classify(q["text"])
+        emit(DBG.explain_query(
+            q, ranked, Xq, cands, rr, prod_by_id, bm, ds,
+            labels=judgments[q["query_id"]], top_n=4,
+            query_type=qtype, fusion_weight=router.weight_for(q["text"])))
+    emit("The `why` line is OCCLUSION against the candidate-set median, not SHAP.")
+    emit("It is blind to interactions and it is labelled as an approximation")
+    emit("everywhere it appears, because calling it SHAP would be a nicer word and")
+    emit("a false one. The baseline is this query's candidates rather than a global")
+    emit("median, because the question is why this document won AMONG THESE, not")
+    emit("why it is good in the abstract.")
 
     emit("")
     emit("(%.0fs)" % (time.time() - t0))

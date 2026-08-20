@@ -186,13 +186,13 @@ is the measurement that says you need one.
 5. LATENCY BUDGET AND NDCG PER MILLISECOND
 ==============================================================================
                       p50       p95       p99
-bm25 only           1.280     3.788    11.605
-dense only          0.238     1.785    20.040
-hybrid RRF          2.073     9.945    15.866
-hybrid + rerank    26.339   234.194   997.293
+bm25 only           0.824     1.293     1.570
+dense only          0.112     0.198     0.253
+hybrid RRF          1.128     1.654     1.939
+hybrid + rerank    12.149    16.706    18.977
 
-Re-ranker adds 224.25 ms at p95 and +0.0147 NDCG@10.
-NDCG PER MILLISECOND: +0.00007
+Re-ranker adds 15.05 ms at p95 and +0.0147 NDCG@10.
+NDCG PER MILLISECOND: +0.00098
 
 Search is a latency-budgeted business, so the reranker's value is a
 RATIO, not a delta. At a 40 ms rerank budget this fits; the number that
@@ -221,4 +221,192 @@ the rescued set is reported so the tradeoff is visible rather than
 assumed. Spelling correction, which is the other half of a real rescue
 ladder, is not implemented.
 
-(166s)
+==============================================================================
+7. QUERY-TYPE ROUTER -- THE DEPLOYMENT ANSWER, BUILT
+==============================================================================
+Section 1 ended by saying a single fusion weight gets tuned by the tail
+-- most of the QUERIES and little of the TRAFFIC -- and that the mature
+answer is weights that vary by query type. That was named and not built.
+
+Lexical fusion weight fitted PER TYPE on the training half:
+query type           weight   train NDCG        n
+attribute              1.00       0.9942       98
+navigational           1.00       0.8837      128
+need                   0.00       0.8811       45
+
+Router accuracy vs the generator's true query kind: 100.0% on 329 test
+queries. Confusion:
+routed        attribute  navigational  need
+true                                       
+attribute           108             0     0
+navigational          0           142     0
+need                  0             0    79
+
+                  bm25  fixed 0.6/0.4    routed  routed - fixed
+head            0.7868         0.8175    0.7833         -0.0341
+torso           0.7724         0.8063    0.7908         -0.0154
+tail            0.7731         0.8050    0.7905         -0.0145
+navigational    0.8944         0.8905    0.8937          0.0032
+attribute       0.9775         0.9769    0.9775          0.0006
+need            0.2803         0.4227    0.3471         -0.0756
+ALL             0.7742         0.8065    0.7899         -0.0166
+
+Routing moves aggregate NDCG@10 by -0.0166.
+
+READ THE SEGMENT ROWS, NOT THE AGGREGATE. The router exists to help the
+segments that a compromise weight hurts, and the aggregate is precisely
+the number that hides whether it did:
+  navigational   fixed 0.8905 -> routed 0.8937  (+0.0032)
+  attribute      fixed 0.9769 -> routed 0.9775  (+0.0006)
+  need           fixed 0.4227 -> routed 0.3471  (-0.0756)
+
+The router is rules, not a model, on purpose: it runs on every query
+inside the latency budget, a search engineer has to be able to explain
+why a query routed the way it did, and its features (is there a brand?
+a product noun? a function word?) are the ones a human would use. A
+learned classifier here would buy accuracy and cost debuggability, and
+at this accuracy the trade is not obviously worth it.
+
+==============================================================================
+8. MERCHANDISER BOOSTING -- GOVERNED, LOGGED, AND PRICED
+==============================================================================
+The spec's question: a merchandiser demands their brand ranks top-3 for
+a generic query. Refusing outright and obeying blindly both fail. The
+systems answer is to implement it, scope it, log it, and QUANTIFY what
+it costs in relevance -- so the conversation becomes 'this boost costs
+X NDCG, is it worth it' rather than 'search is broken'.
+
+Rule MERCH-001: brand 'Aeris' into the top 3 for queries matching 'shoe'.
+29 of 329 test queries match.
+
+            n_queries         ndcg  brand_in_top3
+ranking                                          
+organic            29       0.4031         0.1724
+with boost         29       0.3662         1.0000
+
+THE NUMBER THAT MAKES THIS A CONVERSATION: the boost costs -0.0369 NDCG@10
+on the queries it touches, and raises brand presence in the top 3 from
+17% to 100% of those queries.
+
+Every firing is AUDITED -- rule id, owner, which documents moved and
+from where. That audit record is the difference between a governed rule
+and a hack: six months later, someone can ask why this brand outranks
+that one and get an answer with a name attached to it.
+
+The rule is also SCOPED (one brand, one query pattern) rather than a
+global score multiplier. A global brand boost is unmeasurable -- it
+changes every query a little and no query in a way anyone can point at.
+
+==============================================================================
+9. SPELLING CORRECTION IN THE RESCUE LADDER
+==============================================================================
+150 test queries with one character deleted from a token:
+  queries where an UNAMBIGUOUS correction existed : 145 (97%)
+  BM25 NDCG@10 on the typo'd query                : 0.7746
+  BM25 NDCG@10 after correction                   : 0.8984
+
+The corrector is deliberately CONSERVATIVE: it only fires when the token
+is out-of-vocabulary AND exactly one in-vocabulary word sits at edit
+distance one. Aggressive correction is worse than none -- a 'corrected'
+query that changes the user's intent produces confidently wrong results
+and the user cannot tell what happened. The 3% of typos with no
+unambiguous fix fall through to the semantic leg instead, which is what
+the rescue ladder is for.
+
+==============================================================================
+10. INTERLEAVING -- HOW YOU KNOW BEFORE AN A/B
+==============================================================================
+The spec asks how you would know your offline NDCG gains are real before
+running an A/B. The answer is interleaving, and the first pass named it
+and did not build it.
+
+Team-draft interleaving: two rankers take turns drafting into ONE result
+list. The user cannot tell which system produced any given result, so
+their clicks are an unbiased preference signal -- and because every
+session compares both systems, it is far more sensitive than an A/B that
+assigns each user to one.
+
+                             offline_ndcg_delta  a_wins  b_wins  ties  preference_for_a        p_value
+comparison                                                                                            
+routed hybrid vs bm25                    0.0157     112      90   127            0.5545         0.1393
+routed hybrid vs dense only              0.0162     112     109   108            0.5068         0.8930
+
+`preference_for_a` above 0.5 means users clicked the first system's
+results more often when both were shown together. The p-value is a sign
+test over per-query preferences -- the unit is a QUERY and the outcome
+is ordinal, so a sign test is right and a t-test on click counts is not.
+
+THE HONEST CAVEAT, and it is a large one: these clicks are SIMULATED
+from the relevance labels with a geometric position bias. That makes
+this a demonstration that the MACHINERY works -- drafting, attribution,
+sign test -- and not evidence about user preference, because the
+simulated user is defined to like what the labels like. On real traffic
+the entire value of interleaving is that clicks and labels DISAGREE, and
+nothing here can show that. What it does show is that the offline NDCG
+delta and the interleaving preference are two different measurements,
+and shipping on the first without the second is a choice, not a default.
+
+==============================================================================
+11. THE QUERY-DEBUG VIEW
+==============================================================================
+The spec calls this the internal tool every search team builds. The first
+pass shipped a permutation-importance table, which answers a different
+question: what the model uses ON AVERAGE. Debugging a complaint needs to
+know why THIS document beat THAT one for THIS query.
+
+==========================================================================
+QUERY: 'fresh coffee every morning'
+  kind=need  segment=torso  routed=need  lexical_weight=0.00
+
+ 1. Lumen decaf whole bean coffee white            SUBSTITUTE
+    category=coffee_beans     brand=Lumen      price=  26.78 pop=0.00
+    bm25=   1.239   dense=  0.0392
+    why (occlusion vs candidate median, NOT SHAP): exact_noun_match +0.490  rrf +0.161  price_z +0.026  bm25 -0.022
+
+ 2. Vantage decaf whole bean coffee olive          SUBSTITUTE
+    category=coffee_beans     brand=Vantage    price= 160.42 pop=0.00
+    bm25=   1.239   dense=  0.0404
+    why (occlusion vs candidate median, NOT SHAP): exact_noun_match +0.490  rrf +0.173  bm25 -0.008  rating -0.003
+
+ 3. Bastion decaf whole bean coffee black          SUBSTITUTE
+    category=coffee_beans     brand=Bastion    price= 205.87 pop=0.00
+    bm25=   1.239   dense=  0.0404
+    why (occlusion vs candidate median, NOT SHAP): exact_noun_match +0.504  rrf +0.159  price_z +0.013  bm25 -0.008
+
+ 4. Halcyon decaf whole bean coffee white          SUBSTITUTE
+    category=coffee_beans     brand=Halcyon    price= 119.54 pop=0.08
+    bm25=   1.239   dense=  0.0396
+    why (occlusion vs candidate median, NOT SHAP): exact_noun_match +0.490  rrf +0.165  bm25 +0.045  popularity -0.001
+
+==========================================================================
+QUERY: 'Orrery adjustable monitor stand'
+  kind=navigational  segment=tail  routed=navigational  lexical_weight=1.00
+
+ 1. Orrery adjustable monitor stand white          EXACT
+    category=monitor_stand    brand=Orrery     price= 109.55 pop=0.05
+    bm25=  14.512   dense=  0.9540
+    why (occlusion vs candidate median, NOT SHAP): title_token_overlap +0.388  rrf +0.357  dense +0.294  bm25 +0.212
+
+ 2. Orrery bamboo monitor stand white              SUBSTITUTE
+    category=monitor_stand    brand=Orrery     price= 192.27 pop=0.10
+    bm25=   9.618   dense=  0.5747
+    why (occlusion vs candidate median, NOT SHAP): brand_in_query +0.317  title_token_overlap +0.223  dense +0.212  rrf +0.135
+
+ 3. Kestrel adjustable dual monitor monitor riser  SUBSTITUTE
+    category=monitor_stand    brand=Kestrel    price=  89.92 pop=0.15
+    bm25=  10.271   dense=  0.5648
+    why (occlusion vs candidate median, NOT SHAP): bm25 +0.338  dense +0.313  title_token_overlap +0.092  rrf +0.046
+
+ 4. Bastion adjustable bamboo monitor stand burgun SUBSTITUTE
+    category=monitor_stand    brand=Bastion    price=  78.90 pop=0.00
+    bm25=  10.876   dense=  0.6415
+    why (occlusion vs candidate median, NOT SHAP): bm25 +0.278  dense +0.175  rrf -0.150  exact_noun_match -0.055
+
+The `why` line is OCCLUSION against the candidate-set median, not SHAP.
+It is blind to interactions and it is labelled as an approximation
+everywhere it appears, because calling it SHAP would be a nicer word and
+a false one. The baseline is this query's candidates rather than a global
+median, because the question is why this document won AMONG THESE, not
+why it is good in the abstract.
+
+(41s)

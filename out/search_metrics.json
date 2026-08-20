@@ -129,30 +129,117 @@
   },
   "latency": {
     "bm25 only": {
-      "p50": 1.28,
-      "p95": 3.788,
-      "p99": 11.605
+      "p50": 0.824,
+      "p95": 1.293,
+      "p99": 1.57
     },
     "dense only": {
-      "p50": 0.238,
-      "p95": 1.785,
-      "p99": 20.04
+      "p50": 0.112,
+      "p95": 0.198,
+      "p99": 0.253
     },
     "hybrid RRF": {
-      "p50": 2.073,
-      "p95": 9.945,
-      "p99": 15.866
+      "p50": 1.128,
+      "p95": 1.654,
+      "p99": 1.939
     },
     "hybrid + rerank": {
-      "p50": 26.339,
-      "p95": 234.194,
-      "p99": 997.293
+      "p50": 12.149,
+      "p95": 16.706,
+      "p99": 18.977
     }
   },
-  "ndcg_per_ms": 6.6e-05,
+  "ndcg_per_ms": 0.000978,
   "zero_results": {
     "before": 1.0,
     "after": 0.0,
     "rescued_ndcg": 0.9000044430276637
+  },
+  "router": {
+    "weights": {
+      "navigational": 1.0,
+      "attribute": 1.0,
+      "need": 0.0
+    },
+    "accuracy": 1.0,
+    "ndcg": {
+      "bm25": {
+        "head": 0.7868,
+        "torso": 0.7724,
+        "tail": 0.7731,
+        "navigational": 0.8944,
+        "attribute": 0.9775,
+        "need": 0.2803,
+        "ALL": 0.7742
+      },
+      "fixed 0.6/0.4": {
+        "head": 0.8175,
+        "torso": 0.8063,
+        "tail": 0.805,
+        "navigational": 0.8905,
+        "attribute": 0.9769,
+        "need": 0.4227,
+        "ALL": 0.8065
+      },
+      "routed": {
+        "head": 0.7833,
+        "torso": 0.7908,
+        "tail": 0.7905,
+        "navigational": 0.8937,
+        "attribute": 0.9775,
+        "need": 0.3471,
+        "ALL": 0.7899
+      },
+      "routed - fixed": {
+        "head": -0.0341,
+        "torso": -0.0154,
+        "tail": -0.0145,
+        "navigational": 0.0032,
+        "attribute": 0.0006,
+        "need": -0.0756,
+        "ALL": -0.0166
+      }
+    }
+  },
+  "boosting": {
+    "rule": "MERCH-001",
+    "brand": "Aeris",
+    "n_affected": 29,
+    "ndcg_cost": 0.03686796578803797,
+    "table": {
+      "organic": {
+        "n_queries": 29,
+        "ndcg": 0.4031,
+        "brand_in_top3": 0.1724
+      },
+      "with boost": {
+        "n_queries": 29,
+        "ndcg": 0.3662,
+        "brand_in_top3": 1.0
+      }
+    }
+  },
+  "spelling": {
+    "corrected_share": 0.9666666666666667,
+    "ndcg_before": 0.7746373506079673,
+    "ndcg_after": 0.8984175213269309
+  },
+  "interleaving": {
+    "routed hybrid vs bm25": {
+      "offline_ndcg_delta": 0.0157,
+      "a_wins": 112,
+      "b_wins": 90,
+      "ties": 127,
+      "preference_for_a": 0.5545,
+      "p_value": 0.1393
+    },
+    "routed hybrid vs dense only": {
+      "offline_ndcg_delta": 0.0162,
+      "a_wins": 112,
+      "b_wins": 109,
+      "ties": 108,
+      "preference_for_a": 0.5068,
+      "p_value": 0.893
+    }
   }
 }

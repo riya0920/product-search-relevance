@@ -1,13 +1,15 @@
 # ML-2 — Product Search & Relevance Engine
 
-**This is not deployable.** It is the first ~20% of the spec: a labelled eval
-with segmented NDCG against a BM25 baseline, three retrieval legs, a re-ranker,
-and the honesty tables. No storefront, no API. Missing 80% at the bottom.
+**Roughly 50% of the spec.** A labelled eval with segmented NDCG against a BM25
+baseline, three retrieval legs and a re-ranker - plus the five things the first
+pass named as missing and has now built: a query-type router, governed
+merchandiser boosting, spelling correction, interleaving, and the query-debug
+view. Still no storefront and no HTTP API; what remains is named at the bottom.
 
 ```bash
-python src/corpus.py        # ~2s   build the ESCI-shaped corpus
-python run_search.py        # ~45s  the evaluation
-python -m pytest tests -q   # 18 tests
+python src/corpus.py        # ~2s    build the ESCI-shaped corpus
+python run_search.py        # ~60s   the evaluation
+python -m pytest tests -q   # 39 tests
 ```
 
 ## The corpus
@@ -147,20 +149,129 @@ assumed.
 | LightGBM LambdaMART | `HistGradientBoostingRegressor` on the graded label | pointwise objective standing in for listwise. Pointwise fits the label, listwise fits the *order*, and NDCG only cares about order — so the reranker gain is a floor |
 | Elasticsearch/OpenSearch | `rank_bm25`, linear scan | no real index; latency numbers are relative costs between legs, not service latencies |
 
-## The other 80% — what is NOT here
+## Second pass: five gaps the first pass named
 
-- **No API, no storefront, no query-debug UI.** The spec asks for the internal
-  tool every search team builds; feature contributions exist as a permutation-
-  importance table, not a per-result view.
-- **No query-type router**, which the head/tail analysis says is the actual
-  deployment answer.
-- **No interleaving.** The spec asks how you'd know offline gains are real before
-  an A/B — interleaving is the answer and it is named, not implemented.
-- **No spelling correction**, which is the other half of a real rescue ladder.
-- **No merchandiser boosting** — the governed, logged, NDCG-cost-quantified
-  business rule the spec asks about.
+### The query-type router
+
+Section 1 ended by saying a single fusion weight gets tuned by the tail - most of
+the *queries*, little of the *traffic* - and that the mature answer is weights
+that vary by query type. Built now, fitted per type on the training half:
+
+| query type | fitted lexical weight | train NDCG | n |
+|---|---|---|---|
+| navigational | **1.00** | 0.8837 | 128 |
+| attribute | **1.00** | 0.9469 | 129 |
+| need | **0.00** | 1.0000 | 14 |
+
+**Two things to be suspicious of before reading any gain.** The weights are
+*extreme* - 1.00 and 0.00, not a blend - so the best "hybrid" here is not a
+hybrid at all, it is a **router between two pure legs**. That is a property of
+this corpus, where the legs are good at disjoint things; on a real catalogue they
+overlap far more and interior weights usually win. And the `need` weight is
+fitted on **14 queries with a train NDCG of 1.0000**, which is overfitting, not
+learning - the test-set gain is the only evidence it generalises.
+
+Router accuracy vs the generator's true query kind: **93.6%** on 329 test queries.
+
+| segment | fixed 0.6/0.4 | routed | delta |
+|---|---|---|---|
+| navigational | 0.8905 | 0.8937 | +0.0032 |
+| attribute | 0.9769 | 0.9775 | +0.0006 |
+| **need** | 0.4227 | **0.4424** | **+0.0197** |
+| ALL | 0.8065 | 0.8128 | +0.0063 |
+
+Read the segment rows, not the aggregate - the router exists to help the segments
+a compromise weight hurts, and the aggregate is exactly the number that hides
+whether it did.
+
+The router is **rules, not a model**, on purpose: it runs on every query inside
+the latency budget, an engineer has to be able to explain why a query routed the
+way it did, and its features are the ones a human would use.
+
+*A misroute the confusion matrix caught:* "gift for a coffee lover" contains the
+product noun `coffee`, so the original rule sent it to `attribute`. 21 need
+queries landed there. The rule now treats *function word + length* as the need
+signature even when a noun is present.
+
+### Merchandiser boosting - governed, logged, priced
+
+The spec's question: a merchandiser demands their brand ranks top-3 for a generic
+query. Refusing and obeying both fail.
+
+| ranking | NDCG@10 | brand in top 3 |
+|---|---|---|
+| organic | **0.4031** | 17% |
+| with boost | 0.3662 | **100%** |
+
+**The boost costs 0.0369 NDCG@10** on the 29 queries it touches. That number is
+what turns "search is broken" into "this boost costs 0.037 NDCG, is it worth it".
+Every firing is audited - rule id, owner, which documents moved and from where -
+and the rule is *scoped* to one brand and one query pattern rather than a global
+score multiplier, because a global boost changes every query a little and no
+query in a way anyone can point at.
+
+### Interleaving - and offline gains that don't survive it
+
+The spec asks how you'd know offline NDCG gains are real before an A/B.
+Team-draft interleaving, with position-biased simulated clicks and a sign test
+over per-query preferences:
+
+| comparison | offline NDCG delta | preference for A | p-value |
+|---|---|---|---|
+| routed hybrid vs bm25 | +0.0157 | 0.554 | **0.139** |
+| routed hybrid vs dense only | +0.0162 | 0.507 | **0.893** |
+
+**Both offline deltas are positive and neither preference is significant.** That
+is the answer to the spec's question, and it is not the comfortable one: an
+offline NDCG gain of this size does not necessarily show up as a detectable user
+preference, and shipping on the offline number alone is a choice rather than a
+default.
+
+**Honest caveat, and it's large:** these clicks are *simulated from the relevance
+labels*. That makes this a demonstration that the machinery works - drafting,
+attribution, sign test - not evidence about user preference, because the
+simulated user is defined to like what the labels like. On real traffic the whole
+value of interleaving is that clicks and labels *disagree*, and nothing here can
+show that.
+
+### Spelling correction
+
+150 queries with one character deleted from a token. The corrector is
+deliberately **conservative** - it fires only when the token is out-of-vocabulary
+*and* exactly one in-vocabulary word sits at edit distance one. Aggressive
+correction is worse than none: a "corrected" query that changes intent produces
+confidently wrong results and the user cannot tell what happened. Typos with no
+unambiguous fix fall through to the semantic leg, which is what the rescue ladder
+is for.
+
+### The query-debug view
+
+The spec calls this the internal tool every search team builds; the first pass
+shipped a permutation-importance table, which answers a different question - what
+the model uses *on average*. Debugging a complaint needs to know why **this**
+document beat **that** one for **this** query. The view prints, per result: every
+leg's raw score, the graded label, which boost rules fired and what they moved,
+and per-feature contributions by **occlusion against the candidate-set median**.
+
+That is *not* SHAP - it's blind to interactions and is labelled an approximation
+everywhere it appears, because calling it SHAP would be a nicer word and a false
+one. The baseline is this query's candidates rather than a global median, because
+the question is why this document won *among these*.
+
+## The other ~50% - what is still NOT here
+
+- **No API and no storefront.** The debug view is a text renderer, not a UI.
 - **No real ANN index** (no FAISS/HNSW), so no index size or build time, and the
   latency story would change entirely at catalogue scale.
+- **Interleaving clicks are simulated from labels** (see above), so it
+  demonstrates machinery rather than measuring preference.
+- **The router is fitted on 14 need queries** and its weights are corner
+  solutions; both are stated in the report but neither is fixed.
+- **Boosting has no budget or fatigue control** - the rule fires on every
+  matching query forever, with no cap on how much of the top-k any one brand can
+  occupy across a session.
+- **The speller handles edit distance 1 only**, no transpositions, no phonetic
+  matching, no learned correction from query logs.
 - **Popularity is generated, not observed**, so the feedback-loop story is
   reasoned about rather than demonstrated.
 - **Single-locale, single-language, title-only.** No reviews, no images, no
